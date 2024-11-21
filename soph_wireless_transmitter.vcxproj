@@ -145,6 +145,9 @@
   <ItemGroup>
     <ClCompile Include="soph_wireless_transmitter.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="packet.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
