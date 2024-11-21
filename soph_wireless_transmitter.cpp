@@ -24,6 +24,7 @@ const vr::ETrackedDeviceProperty PROPS_TO_TRACK_STRING[] = {
 	vr::ETrackedDeviceProperty::Prop_NamedIconPathDeviceSearching_String,
 	vr::ETrackedDeviceProperty::Prop_NamedIconPathDeviceSearchingAlert_String,
 	vr::ETrackedDeviceProperty::Prop_NamedIconPathDeviceReady_String,
+	vr::ETrackedDeviceProperty::Prop_NamedIconPathDeviceReadyAlert_String,
 	vr::ETrackedDeviceProperty::Prop_NamedIconPathDeviceNotReady_String,
 	vr::ETrackedDeviceProperty::Prop_NamedIconPathDeviceStandby_String,
 	vr::ETrackedDeviceProperty::Prop_NamedIconPathDeviceAlertLow_String,
@@ -119,11 +120,34 @@ sockaddr_in get_sending_sockaddr(const char ip[32]) {
 	return target_addr;
 }
 
-SOCKET get_sending_socket() {
-
+SOCKET get_udp_sending_socket() {
 	SOCKET sending_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
 	return sending_socket;
+}
+
+SOCKET create_and_connect_tcp_sending_socket(sockaddr_in server_addr) {
+	SOCKET sending_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (connect(sending_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+		printf("Connection failed: %d\n", WSAGetLastError());
+		closesocket(sending_socket);
+		WSACleanup();
+		exit(1);
+	}
+
+	return sending_socket;
+}
+
+void send_and_forget_tcp(SOCKET sending_socket, const char* message, int length) {
+	if (send(sending_socket, message, length, 0) == SOCKET_ERROR) {
+		printf("Send failed: %d\n", WSAGetLastError());
+		closesocket(sending_socket);
+		WSACleanup();
+		exit(1);
+	}
+	else {
+		printf("Sent TCP packet!!\n");
+	}
 }
 
 int main(int argc, char* argv[])
@@ -162,8 +186,9 @@ int main(int argc, char* argv[])
 		WSACleanup();
 		return 1;
 	}
-	SOCKET sending_socket = get_sending_socket();
+	SOCKET sending_udp_socket = get_udp_sending_socket();
 	sockaddr_in target_addr = get_sending_sockaddr(ip_addr);
+	SOCKET sending_tcp_socket = create_and_connect_tcp_sending_socket(target_addr);
 
 	std::unordered_map<std::string, LastSeenProps> registered_device_last_seen_props{};
 
@@ -218,10 +243,7 @@ int main(int argc, char* argv[])
 						p.property_update.property = PROPS_TO_TRACK_I32[i];
 						p.property_update.type = UpdateValueType::INT32_T;
 						p.property_update.value_int32 = new_value;
-						res = sendto(sending_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
-						if (res == SOCKET_ERROR) {
-							wprintf(L"sendto failed with error: %d\n", WSAGetLastError());
-						}
+						send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
 					}
 
 					for (size_t i = 0; i < PROPS_TO_TRACK_STRING_LENGTH; i++)
@@ -230,12 +252,19 @@ int main(int argc, char* argv[])
 						char new_value[64];
 						sys->GetStringTrackedDeviceProperty(device_index, PROPS_TO_TRACK_STRING[i], new_value, sizeof(new_value), &e);
 
-						if (e != vr::ETrackedPropertyError::TrackedProp_Success) continue;
+						if (e != vr::ETrackedPropertyError::TrackedProp_Success) {
+							printf(std::format("Failed to get property {}, reason: '{}'\n", (int)PROPS_TO_TRACK_STRING[i], (int) e).c_str());
+							continue;
+						}
 
 						char* old_value = last_seen_props->strings[i];
 
-						if (strcmp(old_value, new_value) == 0) continue;
+						if (strcmp(old_value, new_value) == 0) {
+							printf(std::format("Not setting string property {} to new value '{}'\n", (int)PROPS_TO_TRACK_STRING[i], new_value).c_str());
+							continue;
+						}
 						
+						printf(std::format("Updating string property {} to new value '{}'\n", (int)PROPS_TO_TRACK_STRING[i], new_value).c_str());
 						strncpy_s(last_seen_props->strings[i], new_value, sizeof(new_value));
 
 						Packet p{};
@@ -244,10 +273,7 @@ int main(int argc, char* argv[])
 						p.property_update.property = PROPS_TO_TRACK_STRING[i];
 						p.property_update.type = UpdateValueType::STRING;
 						strncpy_s(p.property_update.value_string, new_value, sizeof(new_value));
-						res = sendto(sending_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
-						if (res == SOCKET_ERROR) {
-							wprintf(L"sendto failed with error: %d\n", WSAGetLastError());
-						}
+						send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
 					}
 
 					for (size_t i = 0; i < PROPS_TO_TRACK_BOOL_LENGTH; i++)
@@ -267,10 +293,7 @@ int main(int argc, char* argv[])
 						p.property_update.property = PROPS_TO_TRACK_BOOL[i];
 						p.property_update.type = UpdateValueType::BOOOL;
 						p.property_update.value_bool = new_value;
-						res = sendto(sending_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
-						if (res == SOCKET_ERROR) {
-							wprintf(L"sendto failed with error: %d\n", WSAGetLastError());
-						}
+						send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
 					}
 
 					for (size_t i = 0; i < PROPS_TO_TRACK_FLOAT_LENGTH; i++)
@@ -290,10 +313,7 @@ int main(int argc, char* argv[])
 						p.property_update.property = PROPS_TO_TRACK_FLOAT[i];
 						p.property_update.type = UpdateValueType::FLOOAT;
 						p.property_update.value_float = new_value;
-						res = sendto(sending_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
-						if (res == SOCKET_ERROR) {
-							wprintf(L"sendto failed with error: %d\n", WSAGetLastError());
-						}
+						send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
 					}
 
 					for (size_t i = 0; i < PROPS_TO_TRACK_UINT64_LENGTH; i++)
@@ -313,10 +333,7 @@ int main(int argc, char* argv[])
 						p.property_update.property = PROPS_TO_TRACK_UINT64[i];
 						p.property_update.type = UpdateValueType::UINT64_T;
 						p.property_update.value_uint64 = new_value;
-						res = sendto(sending_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
-						if (res == SOCKET_ERROR) {
-							wprintf(L"sendto failed with error: %d\n", WSAGetLastError());
-						}
+						send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
 					}
 
 					for (size_t i = 0; i < PROPS_TO_TRACK_M34_LENGTH; i++)
@@ -336,10 +353,7 @@ int main(int argc, char* argv[])
 						p.property_update.property = PROPS_TO_TRACK_UINT64[i];
 						p.property_update.type = UpdateValueType::MATRIX34;
 						memcpy(p.property_update.value_m34, &new_value.m, sizeof(new_value.m));
-						res = sendto(sending_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
-						if (res == SOCKET_ERROR) {
-							wprintf(L"sendto failed with error: %d\n", WSAGetLastError());
-						}
+						send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
 					}
 #pragma endregion
 
@@ -358,7 +372,7 @@ int main(int argc, char* argv[])
 					strncpy_s(p.serial, serial, sizeof(serial));
 					//std::cout << "Pos [x,y,z] = [" << tracked_poses[i].mDeviceToAbsoluteTracking.m[0][3] << ", " << tracked_poses[i].mDeviceToAbsoluteTracking.m[1][3] << ", " << tracked_poses[i].mDeviceToAbsoluteTracking.m[2][3] << "]\n";
 
-					res = sendto(sending_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
+					res = sendto(sending_udp_socket, (char*)&p, sizeof(p), 0, (SOCKADDR*)&target_addr, sizeof(target_addr));
 					if (res == SOCKET_ERROR) {
 						wprintf(L"sendto failed with error: %d\n", WSAGetLastError());
 					}
