@@ -8,18 +8,10 @@
 #include <ws2tcpip.h>
 #include <winsock2.h>
 #include <optional>
-#include <unordered_map>
+#include <set>
+#include <algorithm>
 #include <string>
 #include "packet.h"
-
-struct LastSeenProps {
-	int32_t i32s[PROPS_TO_TRACK_I32_LENGTH];
-	char strings[PROPS_TO_TRACK_STRING_LENGTH][64];
-	bool bools[PROPS_TO_TRACK_BOOL_LENGTH];
-	float floats[PROPS_TO_TRACK_FLOAT_LENGTH];
-	uint64_t uint64s[PROPS_TO_TRACK_UINT64_LENGTH];
-	float value_m34[PROPS_TO_TRACK_UINT64_LENGTH][3][4];
-};
 
 // Stolen from valve docs
 template < class T >
@@ -37,18 +29,6 @@ vr::HmdQuaternion_t HmdQuaternion_FromMatrix(const T& matrix)
 	q.z = copysign(q.z, matrix.m[1][0] - matrix.m[0][1]);
 
 	return q;
-}
-
-bool m34_are_equal(float (*a)[3][4], float (*b)[3][4]) {
-	for (int32_t i = 0; i < 3; ++i)
-	{
-		for (int32_t j = 0; j < 4; ++j)
-		{
-			if (a[i][j] != b[i][j]) return false;
-		}
-	}
-
-	return true;
 }
 
 sockaddr_in get_sending_sockaddr(const char ip[32]) {
@@ -88,6 +68,60 @@ void send_and_forget_tcp(SOCKET sending_socket, const char* message, int length)
 	else {
 		printf("Sent TCP packet!!\n");
 	}
+}
+
+bool has_prop(const vr::ETrackedDeviceProperty props[], size_t size, vr::ETrackedDeviceProperty target) {
+	for (size_t i = 0; i < size; ++i) {
+		if (props[i] == target) {
+			return true;
+		}
+	}
+	return false;
+}
+
+PropertyUpdatePacket generate_update_packet_from_property(int device_index, vr::ETrackedDeviceProperty prop) {
+	PropertyUpdatePacket p{};
+	p.property = prop;
+
+	vr::ETrackedPropertyError e;
+
+	if (has_prop(PROPS_TO_TRACK_I32, PROPS_TO_TRACK_I32_LENGTH, prop)) {
+		p.value_int32 = vr::VRSystem()->GetInt32TrackedDeviceProperty(device_index, prop, &e);
+		p.type = PropValueType::INT32_T;
+	}
+
+	if (has_prop(PROPS_TO_TRACK_STRING, PROPS_TO_TRACK_STRING_LENGTH, prop)) {
+		vr::VRSystem()->GetStringTrackedDeviceProperty(device_index, prop, p.value_string, sizeof(p.value_string), &e);
+		p.type = PropValueType::STRING;
+	}
+
+	if (has_prop(PROPS_TO_TRACK_BOOL, PROPS_TO_TRACK_BOOL_LENGTH, prop)) {
+		p.value_bool= vr::VRSystem()->GetBoolTrackedDeviceProperty(device_index, prop, &e);
+		p.type = PropValueType::BOOOL;
+	}
+
+	if (has_prop(PROPS_TO_TRACK_FLOAT, PROPS_TO_TRACK_FLOAT_LENGTH, prop)) {
+		p.value_float = vr::VRSystem()->GetFloatTrackedDeviceProperty(device_index, prop, &e);
+		p.type = PropValueType::FLOOAT;
+	}
+
+	if (has_prop(PROPS_TO_TRACK_UINT64, PROPS_TO_TRACK_UINT64_LENGTH, prop)) {
+		p.value_uint64 = vr::VRSystem()->GetUint64TrackedDeviceProperty(device_index, prop, &e);
+		p.type = PropValueType::UINT64_T;
+	}
+
+	if (has_prop(PROPS_TO_TRACK_M34, PROPS_TO_TRACK_M34_LENGTH, prop)) {
+		vr::HmdMatrix34_t m = vr::VRSystem()->GetMatrix34TrackedDeviceProperty(device_index, prop, &e);
+		memcpy(p.value_m34, m.m, sizeof(vr::HmdMatrix34_t));
+		p.type = PropValueType::MATRIX34;
+	}
+
+
+	if (e != vr::ETrackedPropertyError::TrackedProp_Success) {
+		p.type = PropValueType::UNINITIALIZED;
+	};
+
+	return p;
 }
 
 int main(int argc, char* argv[])
@@ -130,7 +164,7 @@ int main(int argc, char* argv[])
 	sockaddr_in target_addr = get_sending_sockaddr(ip_addr);
 	SOCKET sending_tcp_socket = create_and_connect_tcp_sending_socket(target_addr);
 
-	std::unordered_map<std::string, LastSeenProps> registered_device_last_seen_props{};
+	std::set<std::string> registered_devices{};
 
 	while (true) {
 		auto start = std::chrono::high_resolution_clock::now();
@@ -147,7 +181,7 @@ int main(int argc, char* argv[])
 			if (vr::VRSystem()->IsTrackedDeviceConnected(device_index)) {
 				// Only trackers
 				uint32_t device_class = vr::VRSystem()->GetInt32TrackedDeviceProperty(device_index, vr::Prop_DeviceClass_Int32);
-				if (device_class == vr::TrackedDeviceClass_GenericTracker || true) { // For now just allow all devices
+				if (device_class == vr::TrackedDeviceClass_GenericTracker || device_class == vr::TrackedDeviceClass::TrackedDeviceClass_Controller) { // For now just allow all devices
 
 					char serial[32];
 					res = sys->GetStringTrackedDeviceProperty(device_index, vr::ETrackedDeviceProperty::Prop_SerialNumber_String, serial, sizeof(serial));
@@ -157,175 +191,71 @@ int main(int argc, char* argv[])
 						continue;
 					}
 
-#pragma region Stupid prop garbage
-					bool first_time = false;
-					std::optional<DeviceRegisterPacket> register_packet;
-
+#pragma region Registration stuff
 					// If the device was not registered before, register it now
-					if (registered_device_last_seen_props.find(serial) == registered_device_last_seen_props.end()) {
-						printf(std::format("Initializing tracker's last seen with serial {}\n", serial).c_str());
-						registered_device_last_seen_props[serial] = LastSeenProps{};
-						first_time = true;
-						register_packet = DeviceRegisterPacket{};
-					}
+					if (!registered_devices.contains(serial)) {
+						printf(std::format("Registering tracker with serial {}\n", serial).c_str());
+						DeviceRegisterPacket register_packet{};
+						registered_devices.insert(serial);
 
-					LastSeenProps* last_seen_props = &registered_device_last_seen_props[serial];
-					// Check each of the props and see if there are any that changed
-					for (size_t i = 0; i < PROPS_TO_TRACK_I32_LENGTH; i++)
-					{
-						vr::ETrackedPropertyError e;
-						int32_t new_value = sys->GetInt32TrackedDeviceProperty(device_index, PROPS_TO_TRACK_I32[i], &e);
-						if (e != vr::ETrackedPropertyError::TrackedProp_Success) continue;
-						int32_t old_value = last_seen_props->i32s[i];
 
-						if (old_value == new_value) continue;
+						// Check each of the props and see if there are any that changed
+						for (size_t i = 0; i < PROPS_TO_TRACK_I32_LENGTH; i++)
+						{
+							PropertyUpdatePacket p = generate_update_packet_from_property(device_index, PROPS_TO_TRACK_I32[i]);
+							memcpy(&register_packet.properties[i], &p, sizeof(p));
+						}
 
-						last_seen_props->i32s[i] = new_value;
+						for (size_t i = 0; i < PROPS_TO_TRACK_STRING_LENGTH; i++)
+						{
+							PropertyUpdatePacket p = generate_update_packet_from_property(device_index, PROPS_TO_TRACK_STRING[i]);
+							memcpy(&register_packet.properties[i + PROPS_TO_TRACK_I32_LENGTH], &p, sizeof(p));
+						}
 
-						Packet p{};
-						strncpy_s(p.serial, serial, sizeof(serial));
-						p.type = PacketType::SMALL_PROP_UPDATE;
-						p.property_update.property = PROPS_TO_TRACK_I32[i];
-						p.property_update.type = PropValueType::INT32_T;
-						p.property_update.value_int32 = new_value;
-						if (first_time)
-							memcpy(&register_packet->properties[i], &p.property_update, sizeof(p.property_update));
-						else
-							send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
-					}
+						for (size_t i = 0; i < PROPS_TO_TRACK_BOOL_LENGTH; i++)
+						{
+							PropertyUpdatePacket p = generate_update_packet_from_property(device_index, PROPS_TO_TRACK_BOOL[i]);
+							memcpy(&register_packet.properties[i + PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH], &p, sizeof(p));
+						}
 
-					for (size_t i = 0; i < PROPS_TO_TRACK_STRING_LENGTH; i++)
-					{
-						vr::ETrackedPropertyError e;
-						char new_value[64];
-						sys->GetStringTrackedDeviceProperty(device_index, PROPS_TO_TRACK_STRING[i], new_value, sizeof(new_value), &e);
+						for (size_t i = 0; i < PROPS_TO_TRACK_FLOAT_LENGTH; i++)
+						{
+							PropertyUpdatePacket p = generate_update_packet_from_property(device_index, PROPS_TO_TRACK_FLOAT[i]);
+							memcpy(&register_packet.properties[i + PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH + PROPS_TO_TRACK_BOOL_LENGTH], &p, sizeof(p));
+						}
 
-						if (e != vr::ETrackedPropertyError::TrackedProp_Success) continue;
-						
+						for (size_t i = 0; i < PROPS_TO_TRACK_UINT64_LENGTH; i++)
+						{
+							PropertyUpdatePacket p = generate_update_packet_from_property(device_index, PROPS_TO_TRACK_UINT64[i]);
+							memcpy(&register_packet.properties[i + PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH + PROPS_TO_TRACK_BOOL_LENGTH + PROPS_TO_TRACK_FLOAT_LENGTH], &p, sizeof(p));
+						}
 
-						char* old_value = last_seen_props->strings[i];
+						for (size_t i = 0; i < PROPS_TO_TRACK_M34_LENGTH; i++)
+						{
+							PropertyUpdatePacket p = generate_update_packet_from_property(device_index, PROPS_TO_TRACK_M34[i]);
+							memcpy(&register_packet.properties[i + PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH + PROPS_TO_TRACK_BOOL_LENGTH + PROPS_TO_TRACK_FLOAT_LENGTH + PROPS_TO_TRACK_UINT64_LENGTH], &p, sizeof(p));
+						}
 
-						if (strcmp(old_value, new_value) == 0) continue;
-
-						strncpy_s(last_seen_props->strings[i], new_value, sizeof(new_value));
-
-						Packet p{};
-						strncpy_s(p.serial, serial, sizeof(serial));
-						p.type = PacketType::SMALL_PROP_UPDATE;
-						p.property_update.property = PROPS_TO_TRACK_STRING[i];
-						p.property_update.type = PropValueType::STRING;
-						strncpy_s(p.property_update.value_string, new_value, sizeof(new_value));
-						if (first_time)
-							memcpy(&register_packet->properties[PROPS_TO_TRACK_I32_LENGTH + i], &p.property_update, sizeof(p.property_update));
-						else
-							send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
-					}
-
-					for (size_t i = 0; i < PROPS_TO_TRACK_BOOL_LENGTH; i++)
-					{
-						vr::ETrackedPropertyError e;
-						bool new_value = sys->GetBoolTrackedDeviceProperty(device_index, PROPS_TO_TRACK_BOOL[i], &e);
-						if (e != vr::ETrackedPropertyError::TrackedProp_Success) continue;
-						bool old_value = last_seen_props->bools[i];
-
-						if (old_value == new_value) continue;
-
-						last_seen_props->bools[i] = new_value;
-
-						Packet p{};
-						strncpy_s(p.serial, serial, sizeof(serial));
-						p.type = PacketType::SMALL_PROP_UPDATE;
-						p.property_update.property = PROPS_TO_TRACK_BOOL[i];
-						p.property_update.type = PropValueType::BOOOL;
-						p.property_update.value_bool = new_value;
-						if (first_time)
-							memcpy(&register_packet->properties[PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH + i], &p.property_update, sizeof(p.property_update));
-						else
-							send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
-					}
-
-					for (size_t i = 0; i < PROPS_TO_TRACK_FLOAT_LENGTH; i++)
-					{
-						vr::ETrackedPropertyError e;
-						float new_value = sys->GetFloatTrackedDeviceProperty(device_index, PROPS_TO_TRACK_BOOL[i], &e);
-						if (e != vr::ETrackedPropertyError::TrackedProp_Success) continue;
-						float old_value = last_seen_props->floats[i];
-
-						if (old_value == new_value) continue;
-
-						last_seen_props->floats[i] = new_value;
-
-						Packet p{};
-						strncpy_s(p.serial, serial, sizeof(serial));
-						p.type = PacketType::SMALL_PROP_UPDATE;
-						p.property_update.property = PROPS_TO_TRACK_FLOAT[i];
-						p.property_update.type = PropValueType::FLOOAT;
-						p.property_update.value_float = new_value;
-						if (first_time)
-							memcpy(&register_packet->properties[PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH + PROPS_TO_TRACK_BOOL_LENGTH + i], &p.property_update, sizeof(p.property_update));
-						else
-							send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
-					}
-
-					for (size_t i = 0; i < PROPS_TO_TRACK_UINT64_LENGTH; i++)
-					{
-						vr::ETrackedPropertyError e;
-						uint64_t new_value = sys->GetUint64TrackedDeviceProperty(device_index, PROPS_TO_TRACK_UINT64[i], &e);
-						if (e != vr::ETrackedPropertyError::TrackedProp_Success) continue;
-						uint64_t old_value = last_seen_props->uint64s[i];
-
-						if (old_value == new_value) continue;
-
-						last_seen_props->uint64s[i] = new_value;
-
-						Packet p{};
-						p.type = PacketType::SMALL_PROP_UPDATE;
-						strncpy_s(p.serial, serial, sizeof(serial));
-						p.property_update.property = PROPS_TO_TRACK_UINT64[i];
-						p.property_update.type = PropValueType::UINT64_T;
-						p.property_update.value_uint64 = new_value;
-						if (first_time)
-							memcpy(&register_packet->properties[PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH + PROPS_TO_TRACK_BOOL_LENGTH + PROPS_TO_TRACK_FLOAT_LENGTH + i], &p.property_update, sizeof(p.property_update));
-						else
-							send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
-					}
-
-					for (size_t i = 0; i < PROPS_TO_TRACK_M34_LENGTH; i++)
-					{
-						vr::ETrackedPropertyError e;
-						vr::HmdMatrix34_t new_value = sys->GetMatrix34TrackedDeviceProperty(device_index, PROPS_TO_TRACK_M34[i], &e);
-						if (e != vr::ETrackedPropertyError::TrackedProp_Success) continue;
-						float (*old_value)[3][4] = &last_seen_props->value_m34[i];
-
-						if (m34_are_equal(old_value, &new_value.m)) continue;
-
-						memcpy(last_seen_props->value_m34[i], &new_value.m, sizeof(new_value.m));
-
-						Packet p{};
-						p.type = PacketType::SMALL_PROP_UPDATE;
-						strncpy_s(p.serial, serial, sizeof(serial));
-						p.property_update.property = PROPS_TO_TRACK_UINT64[i];
-						p.property_update.type = PropValueType::MATRIX34;
-						memcpy(p.property_update.value_m34, &new_value.m, sizeof(new_value.m));
-						if (first_time)
-							memcpy(&register_packet->properties[PROPS_TO_TRACK_I32_LENGTH + PROPS_TO_TRACK_STRING_LENGTH + PROPS_TO_TRACK_BOOL_LENGTH + PROPS_TO_TRACK_FLOAT_LENGTH + PROPS_TO_TRACK_UINT64_LENGTH + i], &p.property_update, sizeof(p.property_update));
-						else
-							send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
-					}
-
-					if (first_time) {
 						BigPacket p{};
 						p.type = PacketType::BIG_DEVICE_REGISTER;
 						strncpy_s(p.serial, serial, sizeof(serial));
-						register_packet->device_class = (vr::ETrackedDeviceClass)sys->GetInt32TrackedDeviceProperty(device_index, vr::ETrackedDeviceProperty::Prop_DeviceClass_Int32);
-						std::memcpy(&p.device_register, &(*register_packet), sizeof(DeviceRegisterPacket));
+						register_packet.device_class = (vr::ETrackedDeviceClass)sys->GetInt32TrackedDeviceProperty(device_index, vr::ETrackedDeviceProperty::Prop_DeviceClass_Int32);
+						std::memcpy(&p.device_register, &register_packet, sizeof(DeviceRegisterPacket));
 
 						send_and_forget_tcp(sending_tcp_socket, (char*)&p, sizeof(p));
-						printf(std::format("Register packet sent for serial '{}' (type: {}). Dc: {}", p.serial, (int)p.type, (int)p.device_register.device_class).c_str());
+						printf(std::format("Register packet sent for serial '{}' (type: {}). Dc: {}\n", p.serial, (int)p.type, (int)p.device_register.device_class).c_str());
 						continue;
 					}
 #pragma endregion
 
+#pragma region Prop update stuff
+					vr::VREvent_t e;
+					while (sys->PollNextEvent(&e, sizeof(e))) {
+						if (e.eventType != vr::EVREventType::VREvent_TrackedDeviceUpdated) continue;
+						vr::VREvent_Property_t* prop = &e.data.property;
+						printf(std::format("Got change for event {}\n", e.eventType).c_str());
+					}
+#pragma endregion
 					// Finally, send the position updates
 					vr::HmdQuaternion_t qRotation = HmdQuaternion_FromMatrix(tracked_poses[device_index].mDeviceToAbsoluteTracking);
 					//std::cout << "Quaternion: [w, x, y, z] = [" << qRotation.w << ", " << qRotation.x << ", " << qRotation.y << ", " << qRotation.z << "]\n";
