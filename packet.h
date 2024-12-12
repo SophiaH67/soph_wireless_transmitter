@@ -81,6 +81,7 @@ struct TrackerUpdatePacket {
 	vr::ETrackingResult result;
 	bool poseIsValid;
 	bool deviceIsConnected;
+	long long unixTimestamp;
 };
 
 enum PropValueType {
@@ -102,7 +103,6 @@ struct PropertyUpdatePacket {
 		float value_float;
 		uint64_t value_uint64;
 		float value_m34[3][4];
-
 	};
 	PropValueType type;
 };

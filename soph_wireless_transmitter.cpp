@@ -268,6 +268,11 @@ int main(int argc, char* argv[])
 					p.tracker_update.vecPosition[0] = tracked_poses[device_index].mDeviceToAbsoluteTracking.m[0][3];
 					p.tracker_update.vecPosition[1] = tracked_poses[device_index].mDeviceToAbsoluteTracking.m[1][3];
 					p.tracker_update.vecPosition[2] = tracked_poses[device_index].mDeviceToAbsoluteTracking.m[2][3];
+
+					auto time = std::chrono::system_clock::now();
+					auto unix = std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch());
+					p.tracker_update.unixTimestamp = unix.count();
+
 					strncpy_s(p.serial, serial, sizeof(serial));
 					//std::cout << "Pos [x,y,z] = [" << tracked_poses[i].mDeviceToAbsoluteTracking.m[0][3] << ", " << tracked_poses[i].mDeviceToAbsoluteTracking.m[1][3] << ", " << tracked_poses[i].mDeviceToAbsoluteTracking.m[2][3] << "]\n";
 
@@ -279,12 +284,14 @@ int main(int argc, char* argv[])
 			}
 		}
 		auto end = std::chrono::high_resolution_clock::now();
-		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-		printf(std::format("Looped (took {})\n", elapsed).c_str());
+		auto elapsed_before = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 		//std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
-		if (elapsed.count() < 50) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time) - elapsed);
+		if (elapsed_before.count() < sleep_time) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time) - elapsed_before);
 		}
-	}
+		auto end_after = std::chrono::high_resolution_clock::now();
+		auto elapsed_after = std::chrono::duration_cast<std::chrono::milliseconds>(end_after - start);
+		printf(std::format("Looped (took {})\n", elapsed_after).c_str());
 
+	}
 }
